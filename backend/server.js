@@ -13,7 +13,10 @@ const PORT = process.env.PORT || 3001;
 const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
 
-const allowedOrigins = ['http://localhost:5173'];
+const allowedOrigins = [
+  'http://localhost:5173',
+  'https://your-app-name.vercel.app'
+];
 app.use(cors({ origin: allowedOrigins }));
 app.use(express.json());
 

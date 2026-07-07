@@ -5,7 +5,7 @@ import ConsultationModal from "./components/ConsultationModal";
 import DiagnosisReport from "./components/DiagnosisReport";
 import RejectionModal from "./components/RejectionModal";
 
-const BACKEND = "http://localhost:3001";
+const BACKEND = "https://drcode-security-diagnostics-production.up.railway.app";
 
 export default function App() {
   const [status, setStatus] = useState("idle");
