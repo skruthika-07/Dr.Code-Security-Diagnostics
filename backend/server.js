@@ -8,6 +8,10 @@ const Groq = require('groq-sdk');
 const { Mistral } = require('@mistralai/mistralai');
 
 const app = express();
+app.use((req, res, next) => {
+  res.setTimeout(280000);
+  next();
+});
 const PORT = process.env.PORT || 3001;
 
 const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
