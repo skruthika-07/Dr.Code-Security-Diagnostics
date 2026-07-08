@@ -19,7 +19,7 @@ const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
 
 const allowedOrigins = [
   'http://localhost:5173',
-  'https://your-app-name.vercel.app'
+  'https://dr-code-security-diagnostics.vercel.app'
 ];
 app.use(cors({ origin: allowedOrigins }));
 app.use(express.json());
