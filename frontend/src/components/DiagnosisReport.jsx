@@ -316,22 +316,20 @@ export default function DiagnosisReport({ report, onReset, truncationWarning, gi
           <p className="font-mono text-xs" style={{ color: '#7a8699', marginBottom: 12 }}>
             Full file content with matching prescriptions applied, verified by a second independent AI pass
           </p>
-          <TiltCard maxTilt={3} glowColor="rgba(75,227,160,0.10)">
-            <div className="card card-glass p-5">
-              <pre
-                className="corrected-code-block text-xs font-mono overflow-x-auto"
-                style={{ margin: 0, whiteSpace: 'pre-wrap', lineHeight: 1.6, color: '#cdd6e4' }}
-              >
-                {report.full_corrected_code}
-              </pre>
-            </div>
-          </TiltCard>
+          <div className="card card-glass p-5">
+            <pre
+              className="corrected-code-block text-xs font-mono overflow-x-auto"
+              style={{ margin: 0, whiteSpace: 'pre-wrap', lineHeight: 1.6, color: '#cdd6e4' }}
+            >
+              {report.full_corrected_code}
+            </pre>
+          </div>
         </div>
       )}
 
       <div className="no-print pt-4 border-t border-navy-border flex flex-col sm:flex-row gap-3 justify-between items-center">
         <p className="text-xs text-slate-600">
-          Dr. Code analysis · Not a substitute for a professional security audit
+          Dr. Code analysis
         </p>
         <div className="flex gap-2">
           <ExportButton report={report} />
