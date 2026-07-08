@@ -100,6 +100,7 @@ function CreatePrCard({ report, githubMeta, githubToken, backend }) {
           path: githubMeta.path,
           sha: githubMeta.sha,
           originalContent: githubMeta.originalContent,
+          correctedContent: report.full_corrected_code,
           findings: report.findings,
         }),
       });

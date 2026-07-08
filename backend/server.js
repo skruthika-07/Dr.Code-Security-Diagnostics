@@ -237,7 +237,7 @@ STEP 0 — CODE PRESENCE CHECK (do this first, before anything else): Determine 
 
 If "no_code_detected" is true: return "findings": [], "overall_risk_score": 0, "summary": "No source code was detected in this image.", "extracted_code": "", "full_corrected_code": "", and skip every step below — do not invent findings for an image with no code.
 
-If code IS present, set "no_code_detected" to false and continue:
+If code IS present, set "no_code_detected" to false and continue. CRITICAL for "extracted_code": transcribe EVERY line of code visible in the image, top to bottom, exactly as shown — not just the line(s) related to a finding. Even if only one specific line has an issue, "extracted_code" must still contain the complete surrounding code exactly as it appears in the screenshot (full function/file/snippet, not an isolated fragment). "full_corrected_code" must then be that same complete transcription with fixes applied in place, never a fix shown in isolation.
 
 STEP 1 - SYNTAX/PARSE ERRORS FIRST: Check for syntax errors that would prevent the code from running at all (missing colons, unterminated strings, indentation errors, mismatched brackets, etc). These are CERTAIN and must be reported as findings if present, before anything else.
 
@@ -528,7 +528,7 @@ app.post('/api/github/create-pr', async (req, res) => {
   const token = getGithubToken(req);
   if (!token) return res.status(401).json({ error: 'Missing GitHub token' });
 
-  const { owner, repo, branch, path: filePath, sha, originalContent, findings } = req.body;
+  const { owner, repo, branch, path: filePath, sha, originalContent, correctedContent, findings } = req.body;
   if (!owner || !repo || !branch || !filePath || !sha || !originalContent) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
@@ -536,24 +536,41 @@ app.post('/api/github/create-pr', async (req, res) => {
   const ghHeaders = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' };
 
   try {
-    let modifiedContent = originalContent;
-    const applied = [];
-    const skipped = [];
-    for (const f of findings || []) {
-      const before = f.remediation_diff?.before;
-      const after = f.remediation_diff?.after;
-      if (!before || !after) continue;
-      if (modifiedContent.includes(before)) {
-        modifiedContent = modifiedContent.replace(before, after);
-        applied.push(f);
-      } else {
-        skipped.push(f);
+    let modifiedContent;
+    let applied = [];
+    let skipped = [];
+
+    // Prefer the full corrected file (already verified by a second AI pass) over fragile
+    // exact-substring matching, which breaks on any whitespace/indentation difference between
+    // the AI's quoted snippet and the real file content.
+    const hasUsableCorrectedFile =
+      typeof correctedContent === 'string' &&
+      correctedContent.trim().length > 0 &&
+      correctedContent.trim() !== originalContent.trim();
+
+    if (hasUsableCorrectedFile) {
+      modifiedContent = correctedContent;
+      applied = findings || [];
+      skipped = [];
+    } else {
+      // Fallback: try exact-match line replacement (works when snippets happen to match verbatim)
+      modifiedContent = originalContent;
+      for (const f of findings || []) {
+        const before = f.remediation_diff?.before;
+        const after = f.remediation_diff?.after;
+        if (!before || !after) continue;
+        if (modifiedContent.includes(before)) {
+          modifiedContent = modifiedContent.replace(before, after);
+          applied.push(f);
+        } else {
+          skipped.push(f);
+        }
       }
     }
 
     if (applied.length === 0) {
       return res.status(400).json({
-        error: "No fixes could be automatically applied — the AI's before/after snippets did not exactly match the file content.",
+        error: "No fixes could be automatically applied — the AI's before/after snippets did not exactly match the file content, and no full corrected file was available as a fallback.",
       });
     }
 
@@ -597,8 +614,11 @@ app.post('/api/github/create-pr', async (req, res) => {
     const skipList = skipped.length
       ? `\n\n### Not auto-applied (snippet didn't match exactly)\n${skipped.map(f => `- **[${f.severity}]** ${f.title}`).join('\n')}`
       : '';
+    const methodNote = hasUsableCorrectedFile
+      ? '\n\n*Applied via the full corrected file (independently re-verified), rather than line-by-line snippet matching.*'
+      : '';
 
-    const prBody = `## 🩺 Dr. Code automated fix\n\nThis PR applies ${applied.length} automated fix(es) found during a Dr. Code security scan of \`${filePath}\`.\n\n### Fixes applied\n${fixList}${skipList}\n\n---\n*Generated automatically by Dr. Code. Please review before merging — AI-generated fixes should always be checked by a human.*`;
+    const prBody = `## 🩺 Dr. Code automated fix\n\nThis PR applies ${applied.length} automated fix(es) found during a Dr. Code security scan of \`${filePath}\`.\n\n### Fixes applied\n${fixList}${skipList}${methodNote}\n\n---\n*Generated automatically by Dr. Code. Please review before merging — AI-generated fixes should always be checked by a human.*`;
 
     const prRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls`, {
       method: 'POST',
