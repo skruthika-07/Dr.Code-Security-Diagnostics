@@ -59,6 +59,22 @@ function recalculateRiskScore(findings) {
   return Math.min(100, score);
 }
 
+// Drops findings whose proposed "fix" is identical to the code it's supposedly fixing —
+// these are AI hallucinations that look like a diagnosis + prescription but change nothing,
+// which is actively misleading rather than just unhelpful.
+function filterNoOpFindings(findings) {
+  if (!findings || findings.length === 0) return [];
+  return findings.filter(f => {
+    const before = (f.remediation_diff?.before || '').trim();
+    const after = (f.remediation_diff?.after || '').trim();
+    if (before && after && before === after) {
+      console.warn('Dropping no-op finding (before === after):', f.title);
+      return false;
+    }
+    return true;
+  });
+}
+
 function applyAllFixes(content, findings) {
   if (!content) return null;
   let result = content;
@@ -102,7 +118,7 @@ async function crossVerifyWithMistral(fileContent, findings) {
 
     const prompt = `You are a second, independent security reviewer checking another AI's analysis of this code. You have three tasks. Return ONE valid JSON object covering all three, no markdown, no explanation outside the JSON.
 
-TASK 1 — VERIFY PROPOSED FIXES: For each finding below that has an "after" fix, check whether it uses any function, API, or method that does not actually exist, or would not compile/run correctly. ALSO check whether the fix actually changes program behavior for the bad case it claims to fix, not just a message or label. If a fix only relabels a problem without changing what the code actually does with bad input, rewrite it so it genuinely changes behavior (e.g. skip/reject/handle the invalid case, not just describe it differently). If already correct and complete, return it unchanged. CRITICAL: every returned fix must be COMPLETE — never use "...", "// rest unchanged", or any placeholder to skip writing real code.
+TASK 1 — VERIFY PROPOSED FIXES: For each finding below that has an "after" fix, check whether it uses any function, API, or method that does not actually exist, or would not compile/run correctly. ALSO check whether the fix actually changes program behavior for the bad case it claims to fix, not just a message or label. If a fix only relabels a problem without changing what the code actually does with bad input, rewrite it so it genuinely changes behavior (e.g. skip/reject/handle the invalid case, not just describe it differently). CRITICAL: the corrected "after" must always be MEANINGFULLY DIFFERENT from "before" — never return code identical to the original as a "fix". If you cannot identify a genuine change that fixes the issue, leave the entry as an empty string rather than echoing the same code back. If already correct and complete, return it unchanged. Every returned fix must be COMPLETE — never use "...", "// rest unchanged", or any placeholder to skip writing real code.
 
 TASK 2 — CHECK FOR MISSED ISSUES (very high bar): Independently re-examine the full source code below, including its very first and very last lines (function/class signature lines are easy to skim past — check them explicitly). Only add a finding if ALL of these are true:
 1. It is directly and immediately exploitable/present using only what is actually in this exact code — no assumption that some other unrelated vulnerability already exists elsewhere in the application.
@@ -189,14 +205,16 @@ STEP 2 — RUNTIME BUGS & ROBUSTNESS: Check for guaranteed runtime errors and lo
 FIX QUALITY REQUIREMENT FOR THIS STEP: your fix must resolve the actual underlying behavior, not just patch a visible symptom like a wrong message or label. Ask yourself this specific question before finalizing any Step 2 fix: "After my fix, does invalid/bad input actually get handled differently than valid input — or does the code just describe it differently while still processing it the same way?" If a bug is "the code detects something is wrong but then proceeds as if it were fine" (e.g. an invalid record still gets included in a total, a failed check doesn't stop execution, an out-of-range value is logged but still used), your fix MUST change what the code actually does with that case — skip it, reject it, clamp it, or otherwise change the resulting behavior — not just correct what gets printed or logged about it. A fix that only changes wording without changing behavior is incomplete and must not be submitted as-is.
 
 STEP 3 — SECURITY VULNERABILITIES (apply strictly):
-- Critical: remote code execution, full system compromise, or complete authentication bypass with no preconditions.
-- High: any path to arbitrary code execution that requires a precondition (e.g. eval/exec on external input, unverified remote script execution via curl|bash, SQL/command injection, insecure deserialization). These are NEVER Medium, even if "just a script."
-- Medium: information disclosure, weak cryptography, insecure permissions, or issues requiring significant attacker effort/access to exploit.
-- Low: best-practice violations with minimal real-world exploitability.
+- Critical (CVSS 9.0-10.0): remote code execution, full system compromise, or complete authentication bypass with no preconditions.
+- High (CVSS 7.0-8.9): any path to arbitrary code execution that requires a precondition (e.g. eval/exec on external input, unverified remote script execution via curl|bash, SQL/command injection, insecure deserialization). These are NEVER Medium, even if "just a script."
+- Medium (CVSS 4.0-6.9): information disclosure, weak cryptography, insecure permissions, or issues requiring significant attacker effort/access to exploit.
+- Low (CVSS 0.1-3.9): best-practice violations with minimal real-world exploitability. Even Low findings must have a small nonzero CVSS score reflecting their real, if minor, risk — do not default to 0.0 for a genuine finding. Only use 0.0 when there is truly no finding at all.
 
 Before answering, mentally check the code line-by-line in order, including the first and last lines. Report every issue that meets the guidance above — do not skip a finding just because it seems minor, and do not invent one that isn't clearly present. Your goal is a complete, exhaustive list, not a curated highlight reel.
 
 FIX QUALITY REQUIREMENT FOR STEP 3: your "after" fix must fully resolve the issue named in the "title" and "description" — not a partial mitigation. If the issue is "missing checksum/signature verification," the fix MUST add real verification (e.g. comparing a sha256sum against a known-good value), not just change execution style.
+
+CRITICAL — NO-OP FIXES ARE FORBIDDEN: "after" in remediation_diff must always be MEANINGFULLY DIFFERENT from "before" — never return identical code as both the problem and the fix. If you cannot identify a genuine code change that resolves the issue, do not include that finding at all rather than submitting a fake fix.
 
 GLOBAL CONSISTENCY REQUIREMENT (applies to every step above): If your fix changes how a piece of data is represented, encoded, formatted, or compared anywhere in the file — for example switching a plaintext value to a hashed value, renaming a variable, or changing a function's expected input shape — you must also update every other place in this same file that creates, seeds, or depends on that same data so the file remains internally consistent and would still actually succeed when run with its own example/demo input. Prefer deriving any updated sample/seed values directly using the same transformation you applied in the fix (e.g. hash the same known plaintext value with the same hashing call) rather than guessing or inventing a placeholder value. A fix that leaves the file permanently unable to succeed — such as comparing live input against sample data that was never actually transformed to match the new format — is an incomplete and unacceptable fix.
 
@@ -212,6 +230,42 @@ Code to analyze:
 ${fileContent}`;
 }
 
+function buildVisionPrompt() {
+  return `You are a senior code reviewer and security analyst. Look at this image carefully.
+
+STEP 0 — CODE PRESENCE CHECK (do this first, before anything else): Determine whether the image actually contains real source code (any programming language, config file, script, markup, etc). Screenshots of UI, photos, diagrams, plain prose/text, memes, charts, or blank/unrelated images do NOT count as code. Set "no_code_detected" to true if there is no real source code visible, and false if there is.
+
+If "no_code_detected" is true: return "findings": [], "overall_risk_score": 0, "summary": "No source code was detected in this image.", "extracted_code": "", "full_corrected_code": "", and skip every step below — do not invent findings for an image with no code.
+
+If code IS present, set "no_code_detected" to false and continue:
+
+STEP 1 - SYNTAX/PARSE ERRORS FIRST: Check for syntax errors that would prevent the code from running at all (missing colons, unterminated strings, indentation errors, mismatched brackets, etc). These are CERTAIN and must be reported as findings if present, before anything else.
+
+STEP 2 - RUNTIME BUGS: Check for guaranteed runtime errors given the actual values/calls present in the code as written (type mismatches, undefined variables, etc). Only report these if they would actually trigger given the literal code shown — do not invent hypothetical inputs that aren't in the code.
+
+STEP 3 - SECURITY VULNERABILITIES: Assign a CVSS score (0.0-10.0) and severity to every finding, matching its actual risk level — do not zero out CVSS just because the code is a small or self-contained snippet. Use this scale:
+- Critical (CVSS 9.0-10.0): remote code execution, full system compromise, complete auth bypass with no preconditions.
+- High (CVSS 7.0-8.9): path to arbitrary code execution requiring a precondition (eval/exec on external input, SQL/command injection, insecure deserialization).
+- Medium (CVSS 4.0-6.9): information disclosure, weak cryptography, insecure permissions, issues requiring real attacker effort.
+- Low (CVSS 0.1-3.9): best-practice violations, minor robustness issues, style/quality issues, syntax errors with no security impact. Even Low-severity findings should have a small nonzero CVSS score (e.g. 1.0-3.9) — do not default to 0.0 for a real finding.
+Only use 0.0 CVSS when no_code_detected is true or there are truly zero findings.
+
+CRITICAL — NO-OP FIXES ARE FORBIDDEN: "after" in remediation_diff must always be MEANINGFULLY DIFFERENT from "before". Never return identical code as both the problem and the fix. If you cannot identify a genuine change that resolves the issue, do not include that finding at all.
+
+Do not speculate about hypothetical future versions of the code. Only report what is verifiably true about the exact code shown in the image.
+
+Return ONLY a valid JSON object with this exact structure, with no markdown formatting, no code fences, and no explanation outside the JSON. CRITICAL: any code you put inside "before", "after", "extracted_code", or "full_corrected_code" fields must have all double quotes escaped as \\", all newlines escaped as \\n, and any literal backslash escaped as \\\\.
+{
+  "no_code_detected": false,
+  "extracted_code": "<the complete code exactly as transcribed from the image, first line to last line>",
+  "findings": [{"title":"","severity":"Critical|High|Medium|Low","cvss_score":0.0,"description":"","attack_narrative":"","affected_line":"line number(s), e.g. 42 or 42-45","remediation_diff":{"before":"the vulnerable code snippet","after":"the fixed/secure code snippet"},"exploitability_confidence":"High|Medium|Low"}],
+  "root_cause_correlation": "",
+  "overall_risk_score": 0,
+  "summary": "",
+  "full_corrected_code": "<the complete transcribed code from extracted_code, with every finding's fix applied, first line to last line, no placeholders or omissions>"
+}`;
+}
+
 app.post('/api/analyze', scanLimiter, upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
@@ -219,23 +273,7 @@ app.post('/api/analyze', scanLimiter, upload.single('file'), async (req, res) =>
 
   try {
     if (isImage) {
-      const visionPrompt = `You are a senior code reviewer and security analyst. Read the code shown in this image carefully and analyze it in this exact priority order:
-
-STEP 1 - SYNTAX/PARSE ERRORS FIRST: Check for syntax errors that would prevent the code from running at all (missing colons, unterminated strings, indentation errors, mismatched brackets, etc). These are CERTAIN and must be reported as Critical findings if present, before anything else.
-
-STEP 2 - RUNTIME BUGS: Check for guaranteed runtime errors given the actual values/calls present in the code as written (type mismatches, undefined variables, etc). Only report these if they would actually trigger given the literal code shown — do not invent hypothetical inputs that aren't in the code.
-
-STEP 3 - SECURITY VULNERABILITIES: Only label something a security "vulnerability" with a CVSS score if there is a real, identifiable attacker-facing input surface (user input, network input, file input, API parameters). If the code only uses hardcoded literals with no external input path, do NOT assign CVSS scores or attacker narratives — instead use severity "Low" and describe it as a code quality/robustness issue, not a vulnerability.
-
-Do not speculate about hypothetical future versions of the code. Only report what is verifiably true about the exact code shown in the image.
-
-Return ONLY a valid JSON object with this exact structure, with no markdown formatting, no code fences, and no explanation outside the JSON. CRITICAL: any code you put inside "before" or "after" fields must have all double quotes escaped as \\", all newlines escaped as \\n, and any literal backslash escaped as \\\\.
-{
-  "findings": [{"title":"","severity":"Critical|High|Medium|Low","cvss_score":0.0,"description":"","attack_narrative":"","affected_line":"line number(s), e.g. 42 or 42-45","remediation_diff":{"before":"the vulnerable code snippet","after":"the fixed/secure code snippet"},"exploitability_confidence":"High|Medium|Low"}],
-  "root_cause_correlation": "",
-  "overall_risk_score": 0,
-  "summary": ""
-}`;
+      const visionPrompt = buildVisionPrompt();
 
       let visionText;
       try {
@@ -269,8 +307,36 @@ Return ONLY a valid JSON object with this exact structure, with no markdown form
       if (!visionMatch) return res.status(500).json({ error: 'Failed to parse image analysis' });
       const imageReport = safeJsonParse(visionMatch[0]);
 
+      // No code found in the image at all — short-circuit, don't run cross-verification
+      if (imageReport.no_code_detected) {
+        return res.json({
+          no_code_detected: true,
+          findings: [],
+          overall_risk_score: 0,
+          summary: imageReport.summary || 'No source code was detected in this image.',
+          full_corrected_code: null,
+        });
+      }
+
+      imageReport.findings = filterNoOpFindings(imageReport.findings);
       imageReport.overall_risk_score = recalculateRiskScore(imageReport.findings);
 
+      // Run the same Mistral cross-check + full-file correction that text uploads get,
+      // using the AI-transcribed code as the "original content"
+      const extractedCode = typeof imageReport.extracted_code === 'string' ? imageReport.extracted_code : '';
+      if (extractedCode) {
+        const { additionalFindings, correctedFullFile } = await crossVerifyWithMistral(extractedCode, imageReport.findings);
+        const merged = filterNoOpFindings([...(imageReport.findings || []), ...additionalFindings]);
+        imageReport.findings = merged;
+        imageReport.overall_risk_score = recalculateRiskScore(imageReport.findings);
+        imageReport.full_corrected_code = pickFullCorrectedCode(
+          extractedCode,
+          correctedFullFile || imageReport.full_corrected_code,
+          imageReport.findings
+        );
+      }
+
+      imageReport.no_code_detected = false;
       return res.json(imageReport);
     }
 
@@ -290,11 +356,13 @@ Return ONLY a valid JSON object with this exact structure, with no markdown form
     if (!jsonMatch) return res.status(500).json({ error: 'Failed to parse response' });
 
     const report = safeJsonParse(jsonMatch[0]);
+    report.findings = filterNoOpFindings(report.findings);
 
     const { additionalFindings, correctedFullFile } = await crossVerifyWithMistral(fileContent, report.findings);
     if (additionalFindings.length > 0) {
       report.findings = [...(report.findings || []), ...additionalFindings];
     }
+    report.findings = filterNoOpFindings(report.findings);
     report.overall_risk_score = recalculateRiskScore(report.findings);
     report.full_corrected_code = pickFullCorrectedCode(fileContent, correctedFullFile, report.findings);
 
@@ -439,11 +507,13 @@ app.post('/api/analyze-github', async (req, res) => {
     if (!jsonMatch) return res.status(500).json({ error: 'Failed to parse response' });
 
     const report = safeJsonParse(jsonMatch[0]);
+    report.findings = filterNoOpFindings(report.findings);
 
     const { additionalFindings, correctedFullFile } = await crossVerifyWithMistral(content, report.findings);
     if (additionalFindings.length > 0) {
       report.findings = [...(report.findings || []), ...additionalFindings];
     }
+    report.findings = filterNoOpFindings(report.findings);
     report.overall_risk_score = recalculateRiskScore(report.findings);
     report.full_corrected_code = pickFullCorrectedCode(content, correctedFullFile, report.findings);
 
