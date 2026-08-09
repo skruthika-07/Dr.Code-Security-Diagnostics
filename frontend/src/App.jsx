@@ -6,7 +6,6 @@ import DiagnosisReport from "./components/DiagnosisReport";
 import RejectionModal from "./components/RejectionModal";
 
 const BACKEND = "https://drcode-security-diagnostics-production.up.railway.app";
-
 export default function App() {
   const [status, setStatus] = useState("idle");
   const [report, setReport] = useState(null);
