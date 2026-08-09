@@ -5,7 +5,7 @@ import ConsultationModal from "./components/ConsultationModal";
 import DiagnosisReport from "./components/DiagnosisReport";
 import RejectionModal from "./components/RejectionModal";
 
-const BACKEND = "https://drcode-security-diagnostics-production.up.railway.app";
+const BACKEND = "https://dr-code-security-diagnostics.onrender.com";
 export default function App() {
   const [status, setStatus] = useState("idle");
   const [report, setReport] = useState(null);
